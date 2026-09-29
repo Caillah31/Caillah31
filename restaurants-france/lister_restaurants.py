@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Lister les restaurants des grandes villes de France.
+Lister les restaurants des grandes villes de France, et de leur périphérie.
 
 Source des données : OpenStreetMap, interrogé via l'API Overpass
 (gratuite, sans clé d'API). Les villes sont traitées dans l'ordre
@@ -8,6 +8,8 @@ défini par VILLES, Toulouse en tête.
 
 Exemples :
     python3 lister_restaurants.py                       # Toulouse uniquement
+    python3 lister_restaurants.py --peripherie          # Toulouse + communes voisines (5 km)
+    python3 lister_restaurants.py --peripherie --rayon 10 --format csv --sortie toulouse.csv
     python3 lister_restaurants.py --villes Toulouse Lyon
     python3 lister_restaurants.py --toutes --format csv --sortie restos.csv
     python3 lister_restaurants.py --types restaurant fast_food --limite 50
@@ -18,6 +20,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import math
 import sys
 import time
 import urllib.error
@@ -83,6 +86,12 @@ OVERPASS_URLS = [
     "https://overpass.openstreetmap.fr/api/interpreter",
 ]
 
+RAYON_PAR_DEFAUT_KM = 5.0
+# Nombre de communes interrogées par requête en mode périphérie.
+TAILLE_LOT = 10
+# Convention Overpass : l'identifiant de la zone d'une relation = 3 600 000 000 + id.
+ID_AREA_RELATION = 3_600_000_000
+
 COLONNES = [
     "ville",
     "nom",
@@ -98,6 +107,10 @@ COLONNES = [
     "osm_id",
 ]
 
+
+# --------------------------------------------------------------------------
+# Requêtes Overpass
+# --------------------------------------------------------------------------
 
 def construire_requete(ville: str, types: list[str]) -> str:
     """Construit la requête Overpass QL pour une commune française."""
@@ -121,6 +134,33 @@ out center tags;
 """
 
 
+def selecteur_commune(ville: str) -> str:
+    """Sélecteur Overpass de la relation « limites administratives » d'une commune."""
+    code = CODES_INSEE.get(ville)
+    if code:
+        return f'rel["ref:INSEE"="{code}"]["boundary"="administrative"]["admin_level"="8"]'
+    return (f'rel["name"="{ville}"]["boundary"="administrative"]'
+            f'["admin_level"="8"]["ref:INSEE"]')
+
+
+def construire_requete_lot(communes: list[dict], types: list[str]) -> str:
+    """Une seule requête pour plusieurs communes.
+
+    Chaque commune est annoncée par sa relation (« out ids »), puis suivie
+    de ses établissements : l'ordre de sortie permet de les rattacher.
+    """
+    types_regex = "|".join(types)
+    blocs = []
+    for c in communes:
+        blocs.append(
+            f'rel({c["id"]}); out ids;\n'
+            f'area({ID_AREA_RELATION + c["id"]})->.a;\n'
+            f'nwr["amenity"~"^({types_regex})$"](area.a);\n'
+            f'out center tags;'
+        )
+    return "[out:json][timeout:180];\n" + "\n".join(blocs) + "\n"
+
+
 def appeler_overpass(requete: str, tentatives: int = 4) -> dict:
     """Envoie la requête à Overpass, avec bascule de serveur et nouvelles tentatives."""
     donnees = urllib.parse.urlencode({"data": requete}).encode("utf-8")
@@ -130,7 +170,7 @@ def appeler_overpass(requete: str, tentatives: int = 4) -> dict:
         req = urllib.request.Request(
             url,
             data=donnees,
-            headers={"User-Agent": "lister-restaurants-france/1.0"},
+            headers={"User-Agent": "lister-restaurants-france/1.1"},
         )
         try:
             with urllib.request.urlopen(req, timeout=200) as rep:
@@ -152,12 +192,24 @@ def appeler_overpass(requete: str, tentatives: int = 4) -> dict:
     raise RuntimeError(f"Overpass injoignable après {tentatives} tentatives : {derniere_erreur}")
 
 
+# --------------------------------------------------------------------------
+# Mise en forme des résultats
+# --------------------------------------------------------------------------
+
 def formater_adresse(tags: dict) -> str:
     morceaux = [
         tags.get("addr:housenumber", ""),
         tags.get("addr:street", ""),
     ]
     return " ".join(m for m in morceaux if m).strip()
+
+
+def population(tags: dict) -> int:
+    """Population OSM d'une commune, 0 si absente ou illisible."""
+    try:
+        return int(str(tags.get("population", "0")).replace(" ", "").split(".")[0])
+    except ValueError:
+        return 0
 
 
 def normaliser(element: dict, ville: str) -> dict | None:
@@ -187,6 +239,10 @@ def normaliser(element: dict, ville: str) -> dict | None:
     }
 
 
+# --------------------------------------------------------------------------
+# Une ville
+# --------------------------------------------------------------------------
+
 def lister_ville(ville: str, types: list[str]) -> list[dict]:
     reponse = appeler_overpass(construire_requete(ville, types))
     lignes = []
@@ -198,14 +254,134 @@ def lister_ville(ville: str, types: list[str]) -> list[dict]:
     return lignes
 
 
-def afficher_table(lignes: list[dict]) -> None:
-    ville_courante = None
+# --------------------------------------------------------------------------
+# Une ville et sa périphérie
+# --------------------------------------------------------------------------
+
+def trouver_commune(ville: str) -> dict:
+    """Retourne la relation OSM de la commune : id, tags et emprise (bounds)."""
+    requete = f"[out:json][timeout:60];\n{selecteur_commune(ville)};\nout bb;\n"
+    reponse = appeler_overpass(requete)
+    candidats = [e for e in reponse.get("elements", [])
+                 if e.get("type") == "relation" and "bounds" in e]
+    if not candidats:
+        raise RuntimeError(f"commune introuvable dans OpenStreetMap : {ville}")
+    # En cas d'homonymes, on garde la plus peuplée.
+    candidats.sort(key=lambda e: -population(e.get("tags", {})))
+    return candidats[0]
+
+
+def communes_autour(ville: str, rayon_km: float) -> list[dict]:
+    """Communes dont le territoire entre dans l'emprise de la ville élargie de rayon_km.
+
+    La ville elle-même est en tête, puis les autres par population décroissante.
+    """
+    principale = trouver_commune(ville)
+    b = principale["bounds"]
+    lat_moy = (b["minlat"] + b["maxlat"]) / 2
+    dlat = rayon_km / 111.32
+    dlon = rayon_km / (111.32 * math.cos(math.radians(lat_moy)))
+    sud, ouest = b["minlat"] - dlat, b["minlon"] - dlon
+    nord, est = b["maxlat"] + dlat, b["maxlon"] + dlon
+    requete = f"""
+[out:json][timeout:90];
+rel["boundary"="administrative"]["admin_level"="8"]["ref:INSEE"]({sud:.5f},{ouest:.5f},{nord:.5f},{est:.5f});
+out tags;
+"""
+    reponse = appeler_overpass(requete)
+    communes: list[dict] = []
+    vus: set[int] = set()
+    for e in reponse.get("elements", []):
+        tags = e.get("tags", {})
+        if e.get("type") != "relation" or not tags.get("name") or e["id"] in vus:
+            continue
+        vus.add(e["id"])
+        communes.append({
+            "id": e["id"],
+            "nom": tags["name"],
+            "insee": tags.get("ref:INSEE", ""),
+            "population": population(tags),
+        })
+    if principale["id"] not in vus:
+        tags = principale.get("tags", {})
+        communes.append({
+            "id": principale["id"],
+            "nom": tags.get("name", ville),
+            "insee": tags.get("ref:INSEE", ""),
+            "population": population(tags),
+        })
+    communes.sort(key=lambda c: (c["id"] != principale["id"], -c["population"], c["nom"]))
+    return communes
+
+
+def lister_lot(communes: list[dict], types: list[str]) -> list[dict]:
+    """Liste les établissements d'un lot de communes en une seule requête."""
+    reponse = appeler_overpass(construire_requete_lot(communes, types))
+    par_id = {c["id"]: c for c in communes}
+    groupes: dict[int, list[dict]] = {c["id"]: [] for c in communes}
+    courante: int | None = None
+    for element in reponse.get("elements", []):
+        if element["type"] == "relation" and element["id"] in par_id:
+            courante = element["id"]          # en-tête : on change de commune
+            continue
+        if courante is None:
+            continue
+        ligne = normaliser(element, par_id[courante]["nom"])
+        if ligne:
+            groupes[courante].append(ligne)
+    lignes: list[dict] = []
+    for ident in groupes:                     # ordre des communes conservé
+        groupes[ident].sort(key=lambda l: l["nom"].lower())
+        lignes.extend(groupes[ident])
+    return lignes
+
+
+def lister_peripherie(ville: str, rayon_km: float, types: list[str], pause: float) -> list[dict]:
+    print(f"recherche des communes à moins de {rayon_km:g} km…",
+          file=sys.stderr, end=" ", flush=True)
+    communes = communes_autour(ville, rayon_km)
+    print(f"{len(communes)} communes", file=sys.stderr)
+    lots = [communes[i:i + TAILLE_LOT] for i in range(0, len(communes), TAILLE_LOT)]
+    lignes: list[dict] = []
+    for j, lot in enumerate(lots):
+        apercu = ", ".join(c["nom"] for c in lot[:3]) + ("…" if len(lot) > 3 else "")
+        print(f"    lot {j + 1}/{len(lots)} ({apercu})…", file=sys.stderr, end=" ", flush=True)
+        try:
+            resultat = lister_lot(lot, types)
+        except Exception as e:  # un lot en échec ne doit pas bloquer les autres
+            print(f"échec : {e}", file=sys.stderr)
+            continue
+        print(f"{len(resultat)} établissements", file=sys.stderr)
+        lignes.extend(resultat)
+        if j < len(lots) - 1:
+            time.sleep(pause)
+    return lignes
+
+
+# --------------------------------------------------------------------------
+# Sorties
+# --------------------------------------------------------------------------
+
+def limiter_par_ville(lignes: list[dict], maximum: int) -> list[dict]:
+    compte: dict[str, int] = {}
+    resultat = []
     for l in lignes:
-        if l["ville"] != ville_courante:
-            ville_courante = l["ville"]
-            print(f"\n=== {ville_courante} ===")
-        details = " | ".join(x for x in (l["cuisine"], l["adresse"], l["telephone"]) if x)
-        print(f"- {l['nom']}" + (f"  ({details})" if details else ""))
+        compte[l["ville"]] = compte.get(l["ville"], 0) + 1
+        if compte[l["ville"]] <= maximum:
+            resultat.append(l)
+    return resultat
+
+
+def afficher_table(lignes: list[dict], fichier=None) -> None:
+    fichier = fichier or sys.stdout
+    par_ville: dict[str, list[dict]] = {}
+    for l in lignes:
+        par_ville.setdefault(l["ville"], []).append(l)
+    for ville, etablissements in par_ville.items():
+        print(f"\n=== {ville} ({len(etablissements)} établissements) ===", file=fichier)
+        for l in etablissements:
+            details = " | ".join(x for x in (l["cuisine"], l["adresse"], l["telephone"]) if x)
+            print(f"- {l['nom']}" + (f"  ({details})" if details else ""), file=fichier)
 
 
 def ecrire_csv(lignes: list[dict], fichier) -> None:
@@ -214,6 +390,10 @@ def ecrire_csv(lignes: list[dict], fichier) -> None:
     w.writerows(lignes)
 
 
+# --------------------------------------------------------------------------
+# Programme principal
+# --------------------------------------------------------------------------
+
 def main() -> int:
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -221,15 +401,24 @@ def main() -> int:
                    help="villes à traiter (défaut : Toulouse)")
     p.add_argument("--toutes", action="store_true",
                    help=f"traiter les {len(VILLES)} plus grandes villes, Toulouse en premier")
+    p.add_argument("--peripherie", action="store_true",
+                   help="inclure les communes de la périphérie de chaque ville "
+                        "(voir --rayon), regroupées par commune")
+    p.add_argument("--rayon", type=float, default=RAYON_PAR_DEFAUT_KM, metavar="KM",
+                   help=f"périphérie : distance autour des limites de la ville, en km "
+                        f"(défaut : {RAYON_PAR_DEFAUT_KM:g})")
     p.add_argument("--types", nargs="+", default=TYPES_PAR_DEFAUT, choices=TYPES_POSSIBLES,
                    help="types d'établissements OSM (défaut : restaurant)")
     p.add_argument("--limite", type=int, default=0,
-                   help="nombre max d'établissements par ville (0 = tous)")
+                   help="nombre max d'établissements par commune (0 = tous)")
     p.add_argument("--format", choices=["table", "csv", "json"], default="table")
     p.add_argument("--sortie", metavar="FICHIER", help="fichier de sortie (défaut : écran)")
     p.add_argument("--pause", type=float, default=3.0,
-                   help="pause en secondes entre deux villes, par respect du serveur (défaut : 3)")
+                   help="pause en secondes entre deux requêtes, par respect du serveur (défaut : 3)")
     args = p.parse_args()
+
+    if args.rayon <= 0:
+        p.error("--rayon doit être strictement positif")
 
     if args.toutes:
         villes = VILLES
@@ -242,13 +431,20 @@ def main() -> int:
     for i, ville in enumerate(villes):
         print(f"[{i + 1}/{len(villes)}] {ville}…", file=sys.stderr, end=" ", flush=True)
         try:
-            lignes = lister_ville(ville, args.types)
+            if args.peripherie:
+                lignes = lister_peripherie(ville, args.rayon, args.types, args.pause)
+            else:
+                lignes = lister_ville(ville, args.types)
         except Exception as e:  # une ville en échec ne doit pas bloquer les autres
             print(f"échec : {e}", file=sys.stderr)
             continue
         if args.limite:
-            lignes = lignes[: args.limite]
-        print(f"{len(lignes)} établissements", file=sys.stderr)
+            lignes = limiter_par_ville(lignes, args.limite)
+        if args.peripherie:
+            print(f"    total {ville} et périphérie : {len(lignes)} établissements",
+                  file=sys.stderr)
+        else:
+            print(f"{len(lignes)} établissements", file=sys.stderr)
         toutes_lignes.extend(lignes)
         if i < len(villes) - 1:
             time.sleep(args.pause)
@@ -261,17 +457,12 @@ def main() -> int:
             json.dump(toutes_lignes, sortie, ensure_ascii=False, indent=2)
             sortie.write("\n")
         else:
-            if args.sortie:
-                # une table dans un fichier : on redirige print
-                sys.stdout, ancien = sortie, sys.stdout
-                afficher_table(toutes_lignes)
-                sys.stdout = ancien
-            else:
-                afficher_table(toutes_lignes)
+            afficher_table(toutes_lignes, sortie)
     finally:
         if args.sortie:
             sortie.close()
-            print(f"\n{len(toutes_lignes)} établissements écrits dans {args.sortie}", file=sys.stderr)
+            print(f"\n{len(toutes_lignes)} établissements écrits dans {args.sortie}",
+                  file=sys.stderr)
 
     return 0
 
