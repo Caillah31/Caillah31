@@ -11,6 +11,8 @@ Exemples :
     python3 lister_restaurants.py --peripherie          # Toulouse + communes voisines (5 km)
     python3 lister_restaurants.py --peripherie --rayon 10 --format csv --sortie toulouse.csv
     python3 lister_restaurants.py --villes Toulouse Lyon
+    python3 lister_restaurants.py --touristiques --saison ete   # stations balnéaires…
+    python3 lister_restaurants.py --liste-touristiques
     python3 lister_restaurants.py --toutes --format csv --sortie restos.csv
     python3 lister_restaurants.py --types restaurant fast_food --limite 50
 """
@@ -77,6 +79,74 @@ CODES_INSEE: dict[str, str] = {
     "Clermont-Ferrand": "63113",
 }
 
+SAISONS_LIBELLES = {
+    "annee": "toute l'année",
+    "ete": "été",
+    "hiver": "hiver",
+    "evenement": "événement / saison particulière",
+}
+
+# Villes à forte fréquentation touristique : (commune, département, saison).
+# Le département sert à lever les homonymes dans OpenStreetMap.
+VILLES_TOURISTIQUES: list[tuple[str, str, str]] = [
+    # --- Toute l'année : grandes destinations urbaines et patrimoniales
+    ("Paris", "75", "annee"), ("Nice", "06", "annee"), ("Bordeaux", "33", "annee"),
+    ("Lyon", "69", "annee"), ("Strasbourg", "67", "annee"), ("Marseille", "13", "annee"),
+    ("Montpellier", "34", "annee"), ("Nantes", "44", "annee"), ("Lille", "59", "annee"),
+    ("Aix-en-Provence", "13", "annee"), ("Avignon", "84", "annee"), ("Carcassonne", "11", "annee"),
+    ("Colmar", "68", "annee"), ("Annecy", "74", "annee"), ("Reims", "51", "annee"),
+    ("Tours", "37", "annee"), ("Rouen", "76", "annee"), ("Dijon", "21", "annee"),
+    ("Beaune", "21", "annee"), ("Albi", "81", "annee"), ("Cahors", "46", "annee"),
+    ("Nîmes", "30", "annee"), ("Arles", "13", "annee"), ("Perpignan", "66", "annee"),
+    ("Bayonne", "64", "annee"), ("Pau", "64", "annee"), ("Versailles", "78", "annee"),
+    ("Chartres", "28", "annee"), ("Blois", "41", "annee"), ("Amboise", "37", "annee"),
+    ("Saint-Émilion", "33", "annee"), ("Bayeux", "14", "annee"), ("Honfleur", "14", "annee"),
+    ("Le Mont-Saint-Michel", "50", "annee"), ("Vannes", "56", "annee"), ("Quimper", "29", "annee"),
+    ("La Rochelle", "17", "annee"),
+    # --- Été : littoral, îles, villages de caractère, stations thermales
+    ("Biarritz", "64", "ete"), ("Saint-Jean-de-Luz", "64", "ete"), ("Soorts-Hossegor", "40", "ete"),
+    ("Capbreton", "40", "ete"), ("Mimizan", "40", "ete"), ("Lacanau", "33", "ete"),
+    ("Arcachon", "33", "ete"), ("La Teste-de-Buch", "33", "ete"), ("Royan", "17", "ete"),
+    ("Saint-Martin-de-Ré", "17", "ete"), ("Les Sables-d'Olonne", "85", "ete"),
+    ("Noirmoutier-en-l'Île", "85", "ete"), ("La Baule-Escoublac", "44", "ete"),
+    ("Saint-Malo", "35", "ete"), ("Dinard", "35", "ete"), ("Quiberon", "56", "ete"),
+    ("Carnac", "56", "ete"), ("Concarneau", "29", "ete"), ("Deauville", "14", "ete"),
+    ("Trouville-sur-Mer", "14", "ete"), ("Cabourg", "14", "ete"), ("Étretat", "76", "ete"),
+    ("Le Touquet-Paris-Plage", "62", "ete"), ("Cannes", "06", "ete"), ("Antibes", "06", "ete"),
+    ("Menton", "06", "ete"), ("Saint-Tropez", "83", "ete"), ("Fréjus", "83", "ete"),
+    ("Saint-Raphaël", "83", "ete"), ("Hyères", "83", "ete"), ("Bandol", "83", "ete"),
+    ("Sanary-sur-Mer", "83", "ete"), ("Cassis", "13", "ete"), ("Saintes-Maries-de-la-Mer", "13", "ete"),
+    ("Le Grau-du-Roi", "30", "ete"), ("La Grande-Motte", "34", "ete"), ("Palavas-les-Flots", "34", "ete"),
+    ("Sète", "34", "ete"), ("Agde", "34", "ete"), ("Gruissan", "11", "ete"),
+    ("Collioure", "66", "ete"), ("Argelès-sur-Mer", "66", "ete"), ("Canet-en-Roussillon", "66", "ete"),
+    ("Ajaccio", "2A", "ete"), ("Porto-Vecchio", "2A", "ete"), ("Bonifacio", "2A", "ete"),
+    ("Bastia", "2B", "ete"), ("Calvi", "2B", "ete"), ("L'Île-Rousse", "2B", "ete"),
+    ("Sarlat-la-Canéda", "24", "ete"), ("Rocamadour", "46", "ete"), ("Cordes-sur-Ciel", "81", "ete"),
+    ("Gordes", "84", "ete"), ("L'Isle-sur-la-Sorgue", "84", "ete"), ("Évian-les-Bains", "74", "ete"),
+    ("Aix-les-Bains", "73", "ete"), ("Vichy", "03", "ete"),
+    # --- Hiver : stations de ski
+    ("Chamonix-Mont-Blanc", "74", "hiver"), ("Megève", "74", "hiver"), ("Morzine", "74", "hiver"),
+    ("Les Gets", "74", "hiver"), ("Châtel", "74", "hiver"), ("La Clusaz", "74", "hiver"),
+    ("Le Grand-Bornand", "74", "hiver"), ("Samoëns", "74", "hiver"), ("Arâches-la-Frasse", "74", "hiver"),
+    ("Val-d'Isère", "73", "hiver"), ("Tignes", "73", "hiver"), ("Courchevel", "73", "hiver"),
+    ("Les Allues", "73", "hiver"), ("Les Belleville", "73", "hiver"), ("La Plagne Tarentaise", "73", "hiver"),
+    ("Bourg-Saint-Maurice", "73", "hiver"), ("Valloire", "73", "hiver"), ("Les Deux Alpes", "38", "hiver"),
+    ("Huez", "38", "hiver"), ("Villard-de-Lans", "38", "hiver"), ("Briançon", "05", "hiver"),
+    ("Saint-Chaffrey", "05", "hiver"), ("Vars", "05", "hiver"), ("Les Orres", "05", "hiver"),
+    ("Font-Romeu-Odeillo-Via", "66", "hiver"), ("Les Angles", "66", "hiver"), ("Cauterets", "65", "hiver"),
+    ("Saint-Lary-Soulan", "65", "hiver"), ("Luz-Saint-Sauveur", "65", "hiver"),
+    ("Bagnères-de-Luchon", "31", "hiver"), ("Ax-les-Thermes", "09", "hiver"), ("Gérardmer", "88", "hiver"),
+    ("La Bresse", "88", "hiver"), ("Métabief", "25", "hiver"), ("Le Mont-Dore", "63", "hiver"),
+    ("Besse-et-Saint-Anastaise", "63", "hiver"),
+    # --- Événement ou saison particulière
+    ("Lourdes", "65", "evenement"),          # pèlerinages, avril à octobre
+    ("Le Mans", "72", "evenement"),          # 24 Heures, juin
+    ("Angoulême", "16", "evenement"),        # festival de la BD, janvier
+    ("Chantilly", "60", "evenement"),        # château, hippodrome
+]
+DEPARTEMENTS: dict[str, str] = {nom: dep for nom, dep, _ in VILLES_TOURISTIQUES}
+SAISONS: dict[str, str] = {nom: SAISONS_LIBELLES[saison] for nom, _, saison in VILLES_TOURISTIQUES}
+
 TYPES_PAR_DEFAUT = ["restaurant"]
 TYPES_POSSIBLES = ["restaurant", "fast_food", "cafe", "bar", "pub", "food_court"]
 
@@ -94,6 +164,7 @@ ID_AREA_RELATION = 3_600_000_000
 
 COLONNES = [
     "ville",
+    "saison_touristique",
     "nom",
     "type",
     "cuisine",
@@ -115,15 +186,7 @@ COLONNES = [
 def construire_requete(ville: str, types: list[str]) -> str:
     """Construit la requête Overpass QL pour une commune française."""
     types_regex = "|".join(types)
-    code = CODES_INSEE.get(ville)
-    if code:
-        # Code INSEE connu : sélection directe, sans ambiguïté.
-        selecteur = f'area["ref:INSEE"="{code}"]["boundary"="administrative"]'
-    else:
-        # Sinon on cherche par nom ; la présence d'un tag ref:INSEE garantit
-        # qu'il s'agit bien d'une commune française (évite Paris au Texas…).
-        selecteur = (f'area["name"="{ville}"]["boundary"="administrative"]'
-                     f'["admin_level"="8"]["ref:INSEE"]')
+    selecteur = "area" + filtres_commune(ville)
     return f"""
 [out:json][timeout:120];
 {selecteur}->.commune;
@@ -134,13 +197,24 @@ out center tags;
 """
 
 
-def selecteur_commune(ville: str) -> str:
-    """Sélecteur Overpass de la relation « limites administratives » d'une commune."""
+def filtres_commune(ville: str) -> str:
+    """Filtres Overpass identifiant une commune française.
+
+    Code INSEE connu : sélection directe, sans ambiguïté. Sinon par nom,
+    restreint au département s'il est connu ; la présence d'un tag ref:INSEE
+    garantit qu'il s'agit bien d'une commune française (évite Paris au Texas…).
+    """
     code = CODES_INSEE.get(ville)
     if code:
-        return f'rel["ref:INSEE"="{code}"]["boundary"="administrative"]["admin_level"="8"]'
-    return (f'rel["name"="{ville}"]["boundary"="administrative"]'
-            f'["admin_level"="8"]["ref:INSEE"]')
+        return f'["ref:INSEE"="{code}"]["boundary"="administrative"]["admin_level"="8"]'
+    dep = DEPARTEMENTS.get(ville)
+    insee = f'["ref:INSEE"~"^{dep}"]' if dep else '["ref:INSEE"]'
+    return f'["name"="{ville}"]["boundary"="administrative"]["admin_level"="8"]{insee}'
+
+
+def selecteur_commune(ville: str) -> str:
+    """Sélecteur Overpass de la relation « limites administratives » d'une commune."""
+    return "rel" + filtres_commune(ville)
 
 
 def construire_requete_lot(communes: list[dict], types: list[str]) -> str:
@@ -225,6 +299,7 @@ def normaliser(element: dict, ville: str) -> dict | None:
         lat, lon = centre.get("lat"), centre.get("lon")
     return {
         "ville": ville,
+        "saison_touristique": SAISONS.get(ville, ""),
         "nom": nom,
         "type": tags.get("amenity", ""),
         "cuisine": tags.get("cuisine", "").replace(";", ", "),
@@ -401,6 +476,14 @@ def main() -> int:
                    help="villes à traiter (défaut : Toulouse)")
     p.add_argument("--toutes", action="store_true",
                    help=f"traiter les {len(VILLES)} plus grandes villes, Toulouse en premier")
+    p.add_argument("--touristiques", action="store_true",
+                   help=f"ajouter les {len(VILLES_TOURISTIQUES)} villes à forte fréquentation "
+                        "touristique (seules, si --villes/--toutes sont absents)")
+    p.add_argument("--saison", nargs="+", choices=sorted(SAISONS_LIBELLES), metavar="SAISON",
+                   help="avec --touristiques : ne garder que ces saisons "
+                        "(annee, ete, hiver, evenement)")
+    p.add_argument("--liste-touristiques", action="store_true",
+                   help="afficher les villes touristiques par saison et quitter")
     p.add_argument("--peripherie", action="store_true",
                    help="inclure les communes de la périphérie de chaque ville "
                         "(voir --rayon), regroupées par commune")
@@ -420,12 +503,23 @@ def main() -> int:
     if args.rayon <= 0:
         p.error("--rayon doit être strictement positif")
 
+    if args.liste_touristiques:
+        for cle, libelle in SAISONS_LIBELLES.items():
+            noms = [n for n, _, sais in VILLES_TOURISTIQUES if sais == cle]
+            print(f"{libelle} ({len(noms)}) : {', '.join(noms)}")
+        return 0
+
+    villes: list[str] = []
     if args.toutes:
-        villes = VILLES
+        villes += VILLES
     elif args.villes:
-        villes = args.villes
-    else:
+        villes += args.villes
+    if args.touristiques:
+        saisons = set(args.saison or SAISONS_LIBELLES)
+        villes += [n for n, _, sais in VILLES_TOURISTIQUES if sais in saisons]
+    if not villes:
         villes = [VILLES[0]]
+    villes = list(dict.fromkeys(villes))  # doublons retirés, ordre conservé
 
     toutes_lignes: list[dict] = []
     for i, ville in enumerate(villes):

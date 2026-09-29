@@ -24,6 +24,11 @@ python3 lister_restaurants.py --peripherie --rayon 10 --format csv --sortie toul
 # Plusieurs villes
 python3 lister_restaurants.py --villes Toulouse Bordeaux Montpellier
 
+# Villes touristiques : toutes, ou seulement l'été / l'hiver
+python3 lister_restaurants.py --touristiques --format csv --sortie touristiques.csv
+python3 lister_restaurants.py --touristiques --saison ete hiver
+python3 lister_restaurants.py --liste-touristiques      # affiche la liste sans interroger
+
 # Les 20 plus grandes villes, export CSV
 python3 lister_restaurants.py --toutes --format csv --sortie restaurants.csv
 
@@ -37,6 +42,9 @@ python3 lister_restaurants.py --types restaurant fast_food --limite 100 --format
 |-------------|--------------------------------------------------------------------|
 | `--villes`  | Villes à traiter (défaut : Toulouse)                               |
 | `--toutes`  | Traite les 20 plus grandes villes, Toulouse en premier             |
+| `--touristiques` | Ajoute les 134 villes à forte fréquentation touristique (seules si `--villes`/`--toutes` absents) |
+| `--saison`  | Avec `--touristiques` : `annee`, `ete`, `hiver`, `evenement` (plusieurs possibles) |
+| `--liste-touristiques` | Affiche les villes touristiques par saison et quitte |
 | `--peripherie` | Ajoute les communes de la périphérie de chaque ville, regroupées par commune |
 | `--rayon`   | Périphérie : distance autour des limites de la ville, en km (défaut : 5) |
 | `--types`   | `restaurant` (défaut), `fast_food`, `cafe`, `bar`, `pub`, `food_court` |
@@ -47,8 +55,21 @@ python3 lister_restaurants.py --types restaurant fast_food --limite 100 --format
 
 ## Colonnes exportées
 
-`ville, nom, type, cuisine, adresse, code_postal, telephone, site_web,
+`ville, saison_touristique, nom, type, cuisine, adresse, code_postal, telephone, site_web,
 horaires, latitude, longitude, osm_id`
+
+## Villes touristiques
+
+La liste `VILLES_TOURISTIQUES` du script regroupe 134 communes classées en
+quatre saisons : **toute l'année** (grandes villes et sites patrimoniaux :
+Paris, Nice, Carcassonne, Albi, Le Mont-Saint-Michel…), **été** (littoral,
+Corse, villages de caractère, stations thermales : Biarritz, Arcachon,
+Saint-Malo, Saint-Tropez, Collioure, Ajaccio, Sarlat…), **hiver** (stations
+de ski : Chamonix, Val-d'Isère, Courchevel, Saint-Lary, Luchon, Font-Romeu…)
+et **événement** (Lourdes, Le Mans, Angoulême, Chantilly). La colonne
+`saison_touristique` des exports reprend cette classification. Chaque
+commune est identifiée par son nom et son département pour éviter les
+homonymes. La liste se complète librement dans le script.
 
 ## Périphérie
 
