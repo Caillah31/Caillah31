@@ -49,6 +49,31 @@ VILLES: list[str] = [
     "Clermont-Ferrand",
 ]
 
+# Codes INSEE des communes ci-dessus : ils identifient la commune sans
+# ambiguïté et rendent la requête Overpass beaucoup plus rapide.
+CODES_INSEE: dict[str, str] = {
+    "Toulouse": "31555",
+    "Paris": "75056",
+    "Marseille": "13055",
+    "Lyon": "69123",
+    "Nice": "06088",
+    "Nantes": "44109",
+    "Montpellier": "34172",
+    "Strasbourg": "67482",
+    "Bordeaux": "33063",
+    "Lille": "59350",
+    "Rennes": "35238",
+    "Toulon": "83137",
+    "Reims": "51454",
+    "Saint-Étienne": "42218",
+    "Le Havre": "76351",
+    "Dijon": "21231",
+    "Grenoble": "38185",
+    "Angers": "49007",
+    "Nîmes": "30189",
+    "Clermont-Ferrand": "63113",
+}
+
 TYPES_PAR_DEFAUT = ["restaurant"]
 TYPES_POSSIBLES = ["restaurant", "fast_food", "cafe", "bar", "pub", "food_court"]
 
@@ -77,13 +102,18 @@ COLONNES = [
 def construire_requete(ville: str, types: list[str]) -> str:
     """Construit la requête Overpass QL pour une commune française."""
     types_regex = "|".join(types)
-    # On part de la France (ISO3166-1=FR) puis on cherche la commune
-    # (admin_level=8) à l'intérieur, pour éviter les homonymes à l'étranger.
+    code = CODES_INSEE.get(ville)
+    if code:
+        # Code INSEE connu : sélection directe, sans ambiguïté.
+        selecteur = f'area["ref:INSEE"="{code}"]["boundary"="administrative"]'
+    else:
+        # Sinon on cherche par nom ; la présence d'un tag ref:INSEE garantit
+        # qu'il s'agit bien d'une commune française (évite Paris au Texas…).
+        selecteur = (f'area["name"="{ville}"]["boundary"="administrative"]'
+                     f'["admin_level"="8"]["ref:INSEE"]')
     return f"""
-[out:json][timeout:180];
-area["ISO3166-1"="FR"]["admin_level"="2"]->.fr;
-rel["name"="{ville}"]["boundary"="administrative"]["admin_level"="8"](area.fr);
-map_to_area->.commune;
+[out:json][timeout:120];
+{selecteur}->.commune;
 (
   nwr["amenity"~"^({types_regex})$"](area.commune);
 );
@@ -91,7 +121,7 @@ out center tags;
 """
 
 
-def appeler_overpass(requete: str, tentatives: int = 3) -> dict:
+def appeler_overpass(requete: str, tentatives: int = 4) -> dict:
     """Envoie la requête à Overpass, avec bascule de serveur et nouvelles tentatives."""
     donnees = urllib.parse.urlencode({"data": requete}).encode("utf-8")
     derniere_erreur: Exception | None = None
@@ -110,8 +140,9 @@ def appeler_overpass(requete: str, tentatives: int = 3) -> dict:
             # 429 = trop de requêtes, 504 = serveur saturé : on attend puis on réessaie
             if e.code in (429, 502, 503, 504):
                 attente = 10 * (tentative + 1)
-                print(f"    serveur occupé ({e.code}), nouvelle tentative dans {attente}s…",
-                      file=sys.stderr)
+                suivant = OVERPASS_URLS[(tentative + 1) % len(OVERPASS_URLS)].split("/")[2]
+                print(f"\n    serveur occupé ({e.code}), nouvelle tentative sur {suivant} "
+                      f"dans {attente}s…", file=sys.stderr)
                 time.sleep(attente)
                 continue
             raise
