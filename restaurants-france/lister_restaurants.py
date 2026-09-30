@@ -158,7 +158,7 @@ OVERPASS_URLS = [
 
 RAYON_PAR_DEFAUT_KM = 5.0
 # Nombre de communes interrogées par requête en mode périphérie.
-TAILLE_LOT = 10
+TAILLE_LOT = 8
 # Convention Overpass : l'identifiant de la zone d'une relation = 3 600 000 000 + id.
 ID_AREA_RELATION = 3_600_000_000
 
@@ -425,12 +425,40 @@ def lister_lot(communes: list[dict], types: list[str]) -> list[dict]:
         raise RuntimeError("réponse vide ou tronquée par le serveur")
     manquantes = [c["nom"] for c in communes if c["id"] not in vus]
     if manquantes:
-        print(f"\n    attention, communes absentes de la réponse : {', '.join(manquantes)}",
-              file=sys.stderr)
+        raise RuntimeError("réponse tronquée, communes absentes : " + ", ".join(manquantes))
     lignes: list[dict] = []
     for ident in groupes:                     # ordre des communes conservé
         groupes[ident].sort(key=lambda l: l["nom"].lower())
         lignes.extend(groupes[ident])
+    return lignes
+
+
+def lister_lot_robuste(lot: list[dict], types: list[str], pause: float) -> list[dict]:
+    """Interroge un lot et affiche son résultat ; en cas de réponse tronquée,
+    le découpe en deux et recommence, jusqu'à interroger les communes une par une."""
+    try:
+        resultat = lister_lot(lot, types)
+        print(f"{len(resultat)} établissements", file=sys.stderr)
+        return resultat
+    except Exception as e:  # un lot en échec ne doit pas bloquer les autres
+        print(f"échec : {e}", file=sys.stderr)
+    time.sleep(max(pause, 5))
+    if len(lot) == 1:
+        print(f"    nouvel essai pour {lot[0]['nom']}…", file=sys.stderr, end=" ", flush=True)
+        try:
+            resultat = lister_lot(lot, types)
+            print(f"{len(resultat)} établissements", file=sys.stderr)
+            return resultat
+        except Exception as e:
+            print(f"abandon ({e})", file=sys.stderr)
+            return []
+    milieu = len(lot) // 2
+    lignes: list[dict] = []
+    for moitie in (lot[:milieu], lot[milieu:]):
+        apercu = ", ".join(c["nom"] for c in moitie[:3]) + ("…" if len(moitie) > 3 else "")
+        print(f"    sous-lot ({apercu})…", file=sys.stderr, end=" ", flush=True)
+        lignes.extend(lister_lot_robuste(moitie, types, pause))
+        time.sleep(pause)
     return lignes
 
 
@@ -446,21 +474,7 @@ def lister_peripherie(ville: str, rayon_km: float, types: list[str], pause: floa
     for j, lot in enumerate(lots):
         apercu = ", ".join(c["nom"] for c in lot[:3]) + ("…" if len(lot) > 3 else "")
         print(f"    lot {j + 1}/{len(lots)} ({apercu})…", file=sys.stderr, end=" ", flush=True)
-        resultat = None
-        for essai in range(2):
-            try:
-                resultat = lister_lot(lot, types)
-                break
-            except Exception as e:  # un lot en échec ne doit pas bloquer les autres
-                print(f"échec : {e}", file=sys.stderr)
-                if essai == 0:
-                    print("    nouvel essai du lot dans 20s…", file=sys.stderr, end=" ", flush=True)
-                    time.sleep(20)
-        if resultat is None:
-            print(f"    lot abandonné : {apercu}", file=sys.stderr)
-            continue
-        print(f"{len(resultat)} établissements", file=sys.stderr)
-        lignes.extend(resultat)
+        lignes.extend(lister_lot_robuste(lot, types, pause))
         if j < len(lots) - 1:
             time.sleep(pause)
     return lignes
