@@ -246,15 +246,19 @@ def appeler_overpass(requete: str, tentatives: int = 4) -> dict:
             data=donnees,
             headers={"User-Agent": "lister-restaurants-france/1.1"},
         )
+        suivant = OVERPASS_URLS[(tentative + 1) % len(OVERPASS_URLS)].split("/")[2]
         try:
             with urllib.request.urlopen(req, timeout=200) as rep:
-                return json.load(rep)
+                reponse = json.load(rep)
         except urllib.error.HTTPError as e:
             derniere_erreur = e
             # 429 = trop de requêtes, 504 = serveur saturé : on attend puis on réessaie
             if e.code in (429, 502, 503, 504):
-                attente = 10 * (tentative + 1)
-                suivant = OVERPASS_URLS[(tentative + 1) % len(OVERPASS_URLS)].split("/")[2]
+                attente = 30 * (tentative + 1) if e.code == 429 else 10 * (tentative + 1)
+                try:
+                    attente = max(attente, int(e.headers.get("Retry-After", 0)))
+                except (TypeError, ValueError):
+                    pass
                 print(f"\n    serveur occupé ({e.code}), nouvelle tentative sur {suivant} "
                       f"dans {attente}s…", file=sys.stderr)
                 time.sleep(attente)
@@ -263,6 +267,17 @@ def appeler_overpass(requete: str, tentatives: int = 4) -> dict:
         except (urllib.error.URLError, TimeoutError) as e:
             derniere_erreur = e
             time.sleep(5 * (tentative + 1))
+            continue
+        # Overpass peut répondre 200 avec un résultat vide et une « remark »
+        # d'erreur (délai dépassé, mémoire) : on la traite comme un échec.
+        remarque = str(reponse.get("remark", ""))
+        if "error" in remarque.lower() and not reponse.get("elements"):
+            derniere_erreur = RuntimeError(remarque.strip())
+            print(f"\n    réponse incomplète ({remarque.strip()[:80]}), "
+                  f"nouvelle tentative sur {suivant} dans 15s…", file=sys.stderr)
+            time.sleep(15)
+            continue
+        return reponse
     raise RuntimeError(f"Overpass injoignable après {tentatives} tentatives : {derniere_erreur}")
 
 
@@ -404,6 +419,14 @@ def lister_lot(communes: list[dict], types: list[str]) -> list[dict]:
         ligne = normaliser(element, par_id[courante]["nom"])
         if ligne:
             groupes[courante].append(ligne)
+    vus = {e["id"] for e in reponse.get("elements", [])
+           if e["type"] == "relation" and e["id"] in par_id}
+    if not vus:
+        raise RuntimeError("réponse vide ou tronquée par le serveur")
+    manquantes = [c["nom"] for c in communes if c["id"] not in vus]
+    if manquantes:
+        print(f"\n    attention, communes absentes de la réponse : {', '.join(manquantes)}",
+              file=sys.stderr)
     lignes: list[dict] = []
     for ident in groupes:                     # ordre des communes conservé
         groupes[ident].sort(key=lambda l: l["nom"].lower())
@@ -416,15 +439,25 @@ def lister_peripherie(ville: str, rayon_km: float, types: list[str], pause: floa
           file=sys.stderr, end=" ", flush=True)
     communes = communes_autour(ville, rayon_km)
     print(f"{len(communes)} communes", file=sys.stderr)
-    lots = [communes[i:i + TAILLE_LOT] for i in range(0, len(communes), TAILLE_LOT)]
+    # La ville principale, de loin la plus lourde, est interrogée seule.
+    autres = communes[1:]
+    lots = [communes[:1]] + [autres[i:i + TAILLE_LOT] for i in range(0, len(autres), TAILLE_LOT)]
     lignes: list[dict] = []
     for j, lot in enumerate(lots):
         apercu = ", ".join(c["nom"] for c in lot[:3]) + ("…" if len(lot) > 3 else "")
         print(f"    lot {j + 1}/{len(lots)} ({apercu})…", file=sys.stderr, end=" ", flush=True)
-        try:
-            resultat = lister_lot(lot, types)
-        except Exception as e:  # un lot en échec ne doit pas bloquer les autres
-            print(f"échec : {e}", file=sys.stderr)
+        resultat = None
+        for essai in range(2):
+            try:
+                resultat = lister_lot(lot, types)
+                break
+            except Exception as e:  # un lot en échec ne doit pas bloquer les autres
+                print(f"échec : {e}", file=sys.stderr)
+                if essai == 0:
+                    print("    nouvel essai du lot dans 20s…", file=sys.stderr, end=" ", flush=True)
+                    time.sleep(20)
+        if resultat is None:
+            print(f"    lot abandonné : {apercu}", file=sys.stderr)
             continue
         print(f"{len(resultat)} établissements", file=sys.stderr)
         lignes.extend(resultat)
