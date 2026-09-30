@@ -58,6 +58,29 @@ python3 lister_restaurants.py --types restaurant fast_food --limite 100 --format
 `ville, saison_touristique, nom, type, cuisine, adresse, code_postal, telephone, site_web,
 horaires, latitude, longitude, osm_id`
 
+## Campagne complète et fichiers de prospection
+
+Deux scripts complètent `lister_restaurants.py` :
+
+- `prospection_xlsx.py` transforme un export CSV en classeur Excel de
+  prospection (statut en liste déroulante, dates, interlocuteur, liens carte,
+  synthèse par commune et par cuisine, aide). Nécessite `pip install openpyxl`.
+- `campagne.py` enchaîne toutes les villes voulues, avec leur périphérie,
+  écrit un CSV et un classeur par ville dans `campagne/`, puis un CSV et un
+  classeur globaux. Il reprend là où il s'est arrêté : une ville déjà
+  exportée n'est pas réinterrogée.
+
+```bash
+pip install openpyxl
+python3 campagne.py --toutes                       # 20 grandes villes + périphérie
+python3 campagne.py --touristiques --saison ete    # stations balnéaires + périphérie
+python3 campagne.py --toutes --touristiques        # tout : plusieurs heures, relançable
+python3 prospection_xlsx.py export.csv prospection.xlsx --titre "Mon secteur"
+```
+
+Un export déjà obtenu se réutilise en le copiant dans `campagne/csv/`
+sous le nom de la ville en minuscules sans accents (`toulouse.csv`).
+
 ## Villes touristiques
 
 La liste `VILLES_TOURISTIQUES` du script regroupe 134 communes classées en
